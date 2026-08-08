@@ -351,10 +351,11 @@ git commit -m "feat(api): add JWT auth with Operador/Admin roles"
 
 - [ ] **Step 1: Implement `ResolveScan(barcode, operadorId)`**
   1. Parse barcode
-  2. Query `ordemproducao` by OPP_NUMERO + opp_procodigo → else "Ordem de produção não encontrada"
-  3. Query produto → else "Produto inativo"
-  4. Validate against operador filters (tipo/grupo/subgrupo) → else "Produto não pertence à seleção atual"
-  5. Return preview with `quantidadePadrao: 1`
+  2. Query produto (`pro_ativo = 1`) → else "Produto inativo"
+  3. Query `ordemproducao` by OPP_NUMERO + opp_procodigo AND `COALESCE(opp_dtini, OPP_DTEMIS) >= DATEADD(month, -1, today)` → else "Ordem de produção não encontrada"
+  4. Query `unidadepro` (`unp_ativo = 1`, unit from OP) — join `unidade` (`UND_ATIVO = 1`)
+  5. Validate against operador filters (tipo/grupo/subgrupo) → else "Produto não pertence à seleção atual"
+  6. Return preview with `quantidadePadrao: 1`, lote and validade from OP
 
 - [ ] **Step 2: Implement `SubmitContagem(dto, operadorId)`** — snapshot current filters into row
 
