@@ -8,9 +8,9 @@ Warehouse operators need to quickly count stock during rotating inventory cycles
 
 ## Constraints
 
-- Product, unit, and production order data already exists in Azure SQL (`stg_erp` schema, read-only for the app).
-- ERP import is manual CSV upload (admin).
-- Item type comes from ERP; group and subgroup are classified in the app.
+- Product, unit, and production order data already exists in Azure SQL (`stg_erp` schema, read-only for the app), populated by external ETL — **no admin CSV import in MVP**.
+- Item type comes from ERP (`pro_tpicodigo`, string); group and subgroup are classified in the app (separate from ERP `grupopro`/`subgrupopro` staging tables).
+- App does **not** move stock — it records counts and exports data for ERP import.
 - Multiple operators work simultaneously with persistent filter selections.
 - Mobile-first: operators use phone/tablet camera for barcode scanning.
 - Two roles: Operador (count) and Admin (import, classify, export).
@@ -34,7 +34,7 @@ Warehouse operators need to quickly count stock during rotating inventory cycles
                     ┌─────────▼─────────┐
                     │    Azure SQL      │
                     │  stg_erp (read)   │
-                    │  app (read/write) │
+                    │ inventario (r/w)  │
                     └───────────────────┘
 ```
 
@@ -47,8 +47,8 @@ Warehouse operators need to quickly count stock during rotating inventory cycles
 
 ### Database Access Rules
 
-- `stg_erp.*` — read-only (ERP staging, updated externally)
-- `app.*` — read/write (users, classification, counts, filters)
+- `stg_erp.*` — read-only (ERP staging, updated by external ETL)
+- `inventario.*` — read/write (users, classification, counts, filters)
 
 ## ERP Staging Tables (Read-Only)
 
@@ -61,7 +61,7 @@ Key columns used by the app:
 | `pro_codigo` | int | Product code (barcode suffix, e.g. 12122) |
 | `pro_desc` | nvarchar | Product description for search/display |
 | `pro_descres` | nvarchar | Short description |
-| `pro_tpicodigo` | int | Item type (from ERP, used in filters) |
+| `pro_tpicodigo` | nvarchar | Item type (from ERP, e.g. `"04"` — used in filters) |
 | `pro_ativo` | int | Active flag |
 
 ### `stg_erp.stg_bancoxodo__unidade`
@@ -78,8 +78,10 @@ Key columns used by the app:
 |--------|------|-------|
 | `unp_procodigo` | int | Product code FK |
 | `unp_unidade` | nvarchar(10) | Unit code FK |
-| `unp_quantidade` | int | Conversion factor (e.g. 600 kg per pallet) |
-| `unp_ativo` | int | Active flag |
+| `unp_quantidade` | int | Packaging quantity (often equals `unp_fatestoque`) |
+| `unp_fatestoque` | float | Stock conversion factor — multiply counted qty to get stock-base qty |
+| `unp_padestoque` | int | `1` = stock base unit (usually KG); `0` = alternate unit |
+| `unp_ativo` | int | Active flag — filter `unp_ativo = 1`; watch duplicate unit codes (e.g. KG devolução) |
 
 ### `stg_erp.stg_bancoxodo__ordemproducao`
 
@@ -111,7 +113,7 @@ Example: 48335.12122
 1. Parse barcode into `opp_numero` and `pro_codigo`
 2. Lookup `ordemproducao` WHERE `OPP_NUMERO` = opp_numero AND `opp_procodigo` = pro_codigo
 3. Lookup `produto` WHERE `pro_codigo` = pro_codigo AND `pro_ativo` = 1
-4. Lookup `unidadepro` WHERE `unp_procodigo` = pro_codigo AND `unp_unidade` = opp_unpunidade
+4. Lookup `unidadepro` WHERE `unp_procodigo` = pro_codigo AND `unp_unidade` = opp_unpunidade AND `unp_ativo` = 1
 5. Validate product matches operator's active filters (tipo item, grupo, subgrupo)
 6. Return preview: description, unit, lot, expiry, default quantity = 1
 
@@ -122,13 +124,13 @@ Default quantity is always 1 whole unit of the label's unit (e.g. 1 pallet). Ope
 | Condition | Message |
 |-----------|---------|
 | Invalid barcode format | "Formato não reconhecido" |
-| OP not found | "Ordem de produção não encontrada" |
+| OP not found | "Ordem de produção não encontrada" — operator may use manual entry |
 | Product outside filters | "Produto não pertence à seleção atual" |
 | Inactive product | "Produto inativo" |
 
-## App Schema Tables (New)
+## App Schema Tables (New — schema `inventario`)
 
-### `app.usuario`
+### `inventario.usuario`
 
 ```sql
 id            INT IDENTITY PK
@@ -140,7 +142,7 @@ ativo         BIT NOT NULL DEFAULT 1
 criado_em     DATETIME2 NOT NULL
 ```
 
-### `app.grupo`
+### `inventario.grupo`
 
 ```sql
 id            INT IDENTITY PK
@@ -148,51 +150,51 @@ nome          NVARCHAR(100) NOT NULL
 ativo         BIT NOT NULL DEFAULT 1
 ```
 
-### `app.subgrupo`
+### `inventario.subgrupo`
 
 ```sql
 id            INT IDENTITY PK
-grupo_id      INT FK → app.grupo
+grupo_id      INT FK → inventario.grupo
 nome          NVARCHAR(100) NOT NULL
 ativo         BIT NOT NULL DEFAULT 1
 ```
 
-### `app.produto_classificacao`
+### `inventario.produto_classificacao`
 
 ```sql
 pro_codigo    INT PK
-grupo_id      INT FK → app.grupo
-subgrupo_id   INT FK → app.subgrupo
+grupo_id      INT FK → inventario.grupo
+subgrupo_id   INT FK → inventario.subgrupo
 atualizado_em DATETIME2 NOT NULL
-atualizado_por INT FK → app.usuario
+atualizado_por INT FK → inventario.usuario
 ```
 
 Item type (`pro_tpicodigo`) comes from ERP — no separate app table needed.
 
-### `app.contagem`
+### `inventario.contagem`
 
 ```sql
 id            BIGINT IDENTITY PK
 pro_codigo    INT NOT NULL
 opp_numero    INT NULL              -- OP from barcode (null if manual)
-unidade       NVARCHAR(10) NOT NULL
+unidade       NVARCHAR(10) NOT NULL -- unit counted in
 lote          NVARCHAR(15) NOT NULL
 validade      DATE NOT NULL
 quantidade    DECIMAL(18,4) NOT NULL DEFAULT 1
-operador_id   INT FK → app.usuario NOT NULL
-tipo_item     INT NULL              -- filter snapshot
+operador_id   INT FK → inventario.usuario NOT NULL
+tipo_item     NVARCHAR(10) NULL     -- filter snapshot (pro_tpicodigo)
 grupo_id      INT NULL              -- filter snapshot
 subgrupo_id   INT NULL              -- filter snapshot
 origem        NVARCHAR(10) NOT NULL -- 'scan' | 'manual'
 registrado_em DATETIME2 NOT NULL
 ```
 
-Each operator submission creates one row. Filter values are snapshotted for export traceability.
+Each operator submission creates one row. Filter values are snapshotted for export traceability. Operator may count in any product unit; export converts to stock base unit.
 
-### `app.operador_filtro`
+### `inventario.operador_filtro`
 
 ```sql
-operador_id   INT PK FK → app.usuario
+operador_id   INT PK FK → inventario.usuario
 tipos_item    NVARCHAR(MAX) NULL   -- JSON array of pro_tpicodigo
 grupos_id     NVARCHAR(MAX) NULL   -- JSON array of grupo_id
 subgrupos_id  NVARCHAR(MAX) NULL   -- JSON array of subgrupo_id
@@ -206,22 +208,21 @@ Filters persist across sessions until operator changes or clears them.
 | Role | Capabilities |
 |------|-------------|
 | **Operador** | Login, set filters, scan/manual count, submit counts, view recent counts |
-| **Admin** | All Operador capabilities plus: CSV import, grupo/subgrupo management, product classification, export by date range |
+| **Admin** | All Operador capabilities plus: grupo/subgrupo management, product classification, export by date range |
 
 ## Screens
 
 ### Operador (Mobile-First)
 
 1. **Login** — username + password → JWT
-2. **Filtros** — multi-select Tipo de Item / Grupo / Subgrupo; Apply / Clear all; persisted in `app.operador_filtro`
+2. **Filtros** — multi-select Tipo de Item / Grupo / Subgrupo; Apply / Clear all; persisted in `inventario.operador_filtro`
 3. **Contagem** (main) — scan button, manual search button, last 5 counts summary, filter badge
 4. **Confirmação** (after scan or manual) — product, unit, lot, expiry, quantity (default 1); confirm or adjust → submit
 
 ### Admin
 
-1. **Importação ERP** — CSV upload for produto/unidade/unidadepro; validation summary
-2. **Classificação** — list unclassified products; assign grupo/subgrupo individually or in batch
-3. **Exportação** — date range filter; preview; export CSV or Excel
+1. **Classificação** — list unclassified products; assign grupo/subgrupo individually or in batch
+2. **Exportação** — date range filter; preview; export CSV or Excel (with stock-unit conversion)
 
 ## API Endpoints
 
@@ -268,11 +269,10 @@ Base: `/api/v1`. All routes except login require JWT.
 | GET | `/classificacao?semClassificar=true` | Admin | Unclassified products |
 | PUT | `/classificacao/{proCodigo}` | Admin | Assign grupo/subgrupo |
 
-### Import and Export (Admin)
+### Export (Admin)
 
 | Method | Route | Role | Description |
 |--------|-------|------|-------------|
-| POST | `/importacao/csv` | Admin | Upload ERP CSV |
 | GET | `/exportacao?de=&ate=` | Admin | Returns CSV or Excel file |
 
 ### Catalogs
@@ -287,14 +287,29 @@ Base: `/api/v1`. All routes except login require JWT.
 
 Admin exports by date range (start/end). Formats: CSV and Excel.
 
+Operator counts in the unit they choose; export includes both counted values and values converted to the product's stock base unit (`unp_padestoque = 1`).
+
+### Conversion rule
+
+```
+quantidade_estoque = quantidade_contada × unp_fatestoque
+```
+
+Where `unp_fatestoque` comes from `unidadepro` for the counted unit (`unp_unidade = contagem.unidade`, `unp_ativo = 1`). Stock base unit code comes from the row where `unp_padestoque = 1`.
+
+Example (product 12122): 1 PAL → 600 KG; 1 FD → 10 KG; 1 CX → 20 KG.
+
 | Column | Source |
 |--------|--------|
 | Código produto | `contagem.pro_codigo` |
 | Descrição | `produto.pro_desc` |
-| Unidade | `contagem.unidade` |
+| Unidade contada | `contagem.unidade` |
+| Quantidade contada | `contagem.quantidade` |
+| Unidade estoque | `unidadepro.unp_unidade` where `unp_padestoque = 1` |
+| Quantidade estoque | `quantidade × unp_fatestoque` |
 | Lote | `contagem.lote` |
 | Validade | `contagem.validade` |
-| Quantidade | `contagem.quantidade` |
+| OP | `contagem.opp_numero` |
 | Operador | `usuario.nome` |
 | Data/hora | `contagem.registrado_em` |
 
@@ -381,9 +396,23 @@ Visual identity follows the **Xodó** brand design tokens from [cockpit-web](htt
 
 ## Out of Scope (YAGNI)
 
-- Direct ERP API integration (CSV import only for MVP)
+- Admin CSV import of ERP data (staging updated by external ETL)
+- Direct ERP API integration
 - EAN-13 barcode support (proprietary format only)
 - Offline mode / sync queue
 - Supervisor role (only Operador and Admin)
 - Export by grupo/subgrupo filter (date range only)
 - Modifying `stg_erp` data from the app (read-only)
+
+## Azure Data Validation (2026-08-08)
+
+Validated against `dwxodo.database.windows.net` / `dwxodo` via `inventario-rotativo/scripts/analyze-stg-erp.py`. Full output: `inventario-rotativo/scripts/analysis-results-2026-08-08.json`.
+
+| Finding | Detail |
+|---------|--------|
+| `stg_erp` tables | 41+ `stg_bancoxodo__*` tables including produto, unidade, unidadepro, ordemproducao, grupopro, subgrupopro |
+| Product 12122 | PÃO DE QUEIJO TRADICIONAL PCT 1KG; `pro_tpicodigo = "04"`; active |
+| Units 12122 | KG (base, `unp_padestoque=1`), CX/20, FD/10, PAL/600, PCT/1; duplicate KG rows for devolução — use `unp_ativo=1` |
+| Label OP 48335 | **Not in staging** (max OP in DB: 45224). Use `45197.12122` for scan testing (lote `200526`, validade `2026-08-17`) |
+| Stock base unit | All active products have exactly one `unp_padestoque=1` row |
+| Conversion | For most products `unp_quantidade ≈ unp_fatestoque`; export uses `unp_fatestoque`. Edge case: product 550 PAL has quantidade=540, fatestoque=600 |

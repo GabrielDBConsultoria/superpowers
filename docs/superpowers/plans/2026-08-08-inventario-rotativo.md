@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a mobile-first PWA for rotating stock inventory with barcode scanning, manual entry, ERP staging reads, app-schema writes, and admin export — branded as Xodó Inventário.
+**Goal:** Build a mobile-first PWA for rotating stock inventory with barcode scanning, manual entry, ERP staging reads, `inventario` schema writes, and admin export — branded as Xodó Inventário.
 
-**Architecture:** React PWA (`InventarioRotativo.Web`) talks to ASP.NET Core 8 API (`InventarioRotativo.Api`) over HTTPS/JWT. API reads `stg_erp.*` (read-only) and writes `app.*` (users, classification, counts, filters). Barcode `{OPP}.{pro_codigo}` resolves via `ordemproducao` join.
+**Architecture:** React PWA (`InventarioRotativo.Web`) talks to ASP.NET Core 8 API (`InventarioRotativo.Api`) over HTTPS/JWT. API reads `stg_erp.*` (read-only) and writes `inventario.*` (users, classification, counts, filters). Barcode `{OPP}.{pro_codigo}` resolves via `ordemproducao` join.
 
 **Tech Stack:** React 19 + Vite + TypeScript + CSS Modules + html5-qrcode | ASP.NET Core 8 + EF Core + SQL Server | xUnit + Vitest
 
@@ -14,15 +14,15 @@
 
 ## Global Constraints
 
-- Azure SQL: `stg_erp` read-only; `app` read/write
-- Barcode format: `{OPP_NUMERO}.{pro_codigo}` e.g. `48335.12122`
+- Azure SQL: `stg_erp` read-only; `inventario` read/write
+- Barcode format: `{OPP_NUMERO}.{pro_codigo}` e.g. `45197.12122` (test OP from staging; label example `48335` not in DB)
 - Default quantity on scan: `1` (one whole label unit)
 - Roles: `Operador` | `Admin` (JWT claims)
 - UI: CSS Modules + Xodó tokens — no Tailwind, no shadcn
 - Operator screens: max-width ~560px, touch targets min 48px
 - App title: **Xodó Inventário**
 - Error messages in Portuguese (exact strings from spec)
-- Export columns: código, descrição, unidade, lote, validade, quantidade, operador, data/hora
+- Export columns: código, descrição, unidade contada, quantidade contada, unidade estoque, quantidade estoque (via `qtd × unp_fatestoque`), lote, validade, OP, operador, data/hora
 - Out of scope: EAN-13, offline sync, ERP API, modifying `stg_erp` from import in MVP (staging updated externally)
 
 ---
@@ -36,7 +36,7 @@ inventario-rotativo/
 │   ├── appsettings.json
 │   ├── Data/AppDbContext.cs
 │   ├── Data/Migrations/
-│   ├── Entities/          # app schema entities
+│   ├── Entities/          # inventario schema entities
 │   ├── Entities/Stg/      # stg_erp read-only entities (no tracking writes)
 │   ├── Services/
 │   │   ├── BarcodeParser.cs
@@ -64,7 +64,6 @@ inventario-rotativo/
 │   │   │   ├── Confirmacao.tsx
 │   │   │   ├── BuscaManual.tsx
 │   │   │   └── admin/
-│   │   │       ├── Importacao.tsx
 │   │   │       ├── Classificacao.tsx
 │   │   │       └── Exportacao.tsx
 │   │   └── routes.tsx
@@ -297,8 +296,8 @@ git commit -m "feat(api): add JWT auth with Operador/Admin roles"
 - Create: `inventario-rotativo/InventarioRotativo.Api/Controllers/FiltrosController.cs`
 
 **Interfaces:**
-- Produces: `GET /api/v1/filtros` → `{ tiposItem: int[], gruposId: int[], subgruposId: int[] }`
-- Produces: `PUT /api/v1/filtros` — body same shape, upserts `app.operador_filtro`
+- Produces: `GET /api/v1/filtros` → `{ tiposItem: string[], gruposId: int[], subgruposId: int[] }`
+- Produces: `PUT /api/v1/filtros` — body same shape, upserts `inventario.operador_filtro`
 - Produces: `DELETE /api/v1/filtros` — clears arrays
 
 - [ ] **Step 1: Serialize/deserialize JSON arrays** in `OperadorFiltro` entity (`tipos_item`, `grupos_id`, `subgrupos_id`)
@@ -327,10 +326,10 @@ git commit -m "feat(api): add JWT auth with Operador/Admin roles"
   "proCodigo": 12122,
   "descricao": "PÃO DE QUEIJO...",
   "unidade": "PAL",
-  "lote": "070826",
-  "validade": "2026-11-05",
+  "lote": "200526",
+  "validade": "2026-08-17",
   "quantidadePadrao": 1,
-  "oppNumero": 48335
+  "oppNumero": 45197
 }
 ```
 
@@ -339,10 +338,10 @@ git commit -m "feat(api): add JWT auth with Operador/Admin roles"
 ```json
 {
   "proCodigo": 12122,
-  "oppNumero": 48335,
-  "unidade": "PAL",
-  "lote": "070826",
-  "validade": "2026-11-05",
+  "oppNumero": 45197,
+  "unidade": "KG",
+  "lote": "200526",
+  "validade": "2026-08-17",
   "quantidade": 1,
   "origem": "scan"
 }
@@ -419,17 +418,19 @@ git commit -m "feat(api): add JWT auth with Operador/Admin roles"
 
 **Interfaces:**
 - Produces: `GET /api/v1/exportacao?de=2026-08-01&ate=2026-08-08&formato=csv|xlsx`
-- Columns: Código produto, Descrição, Unidade, Lote, Validade, Quantidade, Operador, Data/hora
+- Columns: Código produto, Descrição, Unidade contada, Quantidade contada, Unidade estoque, Quantidade estoque, Lote, Validade, OP, Operador, Data/hora
 
-- [ ] **Step 1: Query contagem** joined with produto + usuario where `registrado_em` between de/ate (inclusive, end of day)
+- [ ] **Step 1: Query contagem** joined with produto + usuario + unidadepro where `registrado_em` between de/ate (inclusive, end of day)
 
-- [ ] **Step 2: Generate CSV** with UTF-8 BOM for Excel compatibility
+- [ ] **Step 2: Compute stock conversion** — `quantidade_estoque = quantidade × unp_fatestoque` for counted unit; stock unit from `unp_padestoque = 1`
 
-- [ ] **Step 3: Generate XLSX** via ClosedXML
+- [ ] **Step 3: Generate CSV** with UTF-8 BOM for Excel compatibility
 
-- [ ] **Step 4: Test** — seed 2 contagens, export returns correct rows
+- [ ] **Step 4: Generate XLSX** via ClosedXML
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Test** — seed 2 contagens (e.g. 1 PAL and 1 FD for product 12122), export shows 600 KG and 10 KG
+
+- [ ] **Step 6: Commit**
 
 ---
 
@@ -566,7 +567,7 @@ npm install react-router-dom html5-qrcode
 - Consumes: classification + grupo/subgrupo APIs
 - Produces: dark sidebar `#1A1A1A`, list unclassified products, assign grupo/subgrupo dropdowns
 
-- [ ] **Step 1: Admin layout** with sidebar nav: Classificação, Exportação, (Importação placeholder)
+- [ ] **Step 1: Admin layout** with sidebar nav: Classificação, Exportação
 
 - [ ] **Step 2: Classificação screen** — filter `semClassificar=true`, inline assign
 
