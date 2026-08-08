@@ -42,7 +42,7 @@ Warehouse operators need to quickly count stock during rotating inventory cycles
 
 | Project | Stack | Deploy |
 |---------|-------|--------|
-| `InventarioRotativo.Web` | React + Vite + TypeScript (PWA) | Azure Static Web Apps |
+| `InventarioRotativo.Web` | React + Vite + TypeScript + CSS Modules (PWA) | Azure Static Web Apps |
 | `InventarioRotativo.Api` | ASP.NET Core 8 + EF Core | Azure App Service |
 
 ### Database Access Rules
@@ -306,6 +306,63 @@ When barcode is unavailable:
 2. Selects unit from product's `unidadepro` entries
 3. Enters lot, expiry, quantity manually
 4. Submits → saved as `origem = 'manual'`, `opp_numero = null`
+
+## Design System (referência: `cockpit-web`)
+
+Visual identity follows the **Xodó** brand design tokens from [cockpit-web](https://github.com/GabrielDBConsultoria/cockpit-web). React is kept; reuse tokens and patterns — do not introduce Tailwind or a new component library for MVP.
+
+### Source files to copy/adapt
+
+| Asset | Path in cockpit-web |
+|-------|---------------------|
+| Design tokens (CSS) | `shared/design-tokens/tokens.css` |
+| Design tokens (JSON) | `shared/design-tokens/tokens.json` |
+| Logo | `src/assets/logo-xodo.png` |
+| Token import pattern | `src/index.css` (imports tokens, sets body defaults) |
+
+### Color palette (revision 2026-08-01)
+
+| Token | Value | Usage |
+|-------|-------|-------|
+| `--color-primary` | `#F4B122` | Amarelo Xodó — buttons, highlights, brand |
+| `--color-topbar` | `#F4B122` | Header background |
+| `--color-sidebar` | `#1A1A1A` | Sidebar background (admin layout) |
+| `--color-background` | `#FFFFFF` | Page background |
+| `--color-text` | `#1A1A1A` | Primary text |
+| `--color-text-muted` | `#666666` | Secondary text |
+| `--color-border` | `#E8E8E8` | Borders, inputs |
+| `--color-surface` | `#FFFFFF` | Cards |
+| `--color-row-hover` | `#FEF3D0` | List/table hover |
+| `--color-status-success` | `#008742` | Positive status |
+| `--color-status-success-bg` | `#D6F0E3` | Success badge background |
+| `--color-status-critical` | `#C01818` | Errors/alerts only (not brand) |
+| `--color-status-critical-bg` | `#FAE5E5` | Error badge background |
+
+### Typography
+
+| Token | Value |
+|-------|-------|
+| `--font-family-primary` | `Segoe UI` |
+| `--font-family-fallback` | `Arial, Helvetica Neue, sans-serif` |
+| `--font-family-body` | primary + fallback stack |
+
+### Layout and component patterns (from cockpit-web operator screens)
+
+- **CSS Modules** per component (e.g. `Contagem.module.css`) — same approach as `modules/paradas/`
+- **Operator screens:** max-width ~560px, centered, mobile-first
+- **Touch targets:** min-height 48px for inputs and buttons
+- **Buttons:** `background: var(--color-primary)`, `border-radius: var(--radius-base)` (4px)
+- **Inputs:** border `var(--color-border)`, focus ring via `border-color: var(--color-primary)` + `box-shadow: 0 0 0 2px var(--color-row-hover)`
+- **Lists/cards:** `var(--color-surface)` background, hover `var(--color-row-hover)`
+- **Header:** yellow topbar (`--color-topbar`) with white logo pill and app title — same pattern as `Topbar.jsx`
+- **Alerts/errors:** use `--color-status-critical` tokens, not primary yellow
+
+### Branding in inventário rotativo
+
+- Logo: `logo-xodo.png` in header
+- App title suggestion: **"Xodó Inventário"** (parallel to "Xodó Produção" in cockpit-web)
+- Operator PWA: single-column flow, no sidebar
+- Admin screens: optional sidebar layout (dark `#1A1A1A`) for import/classification/export
 
 ## Deployment
 
