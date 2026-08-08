@@ -97,6 +97,7 @@ Key columns used by the app:
 | `OPP_DTEMIS` | date | Emission date (fallback if `opp_dtini` is null) |
 | `OPP_STATUS` | nvarchar | OP status — barcode scans require `'F'` (finalizada) |
 | `opp_qtdeproduz` | float | Quantity produced — barcode scans require `> 0` |
+| `opp_inversa` | int | Inverse OP flag — barcode scans require `0` (exclude inversas) |
 
 Updated frequently by external ingestion. App reads only.
 
