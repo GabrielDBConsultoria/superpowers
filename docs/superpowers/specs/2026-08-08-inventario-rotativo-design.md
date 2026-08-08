@@ -1,0 +1,332 @@
+# Inventário Rotativo — Design Spec
+
+Web application for rotating stock inventory (cycle counting). Operators count stock via barcode labels or manual entry. Admins import ERP data, classify products, and export count reports.
+
+## Problem Statement
+
+Warehouse operators need to quickly count stock during rotating inventory cycles. Each product label encodes a production order and product code. The operator must segment counts by item type, group, and subgroup, submit one count per scan, and admins must export results for a date range.
+
+## Constraints
+
+- Product, unit, and production order data already exists in Azure SQL (`stg_erp` schema, read-only for the app).
+- ERP import is manual CSV upload (admin).
+- Item type comes from ERP; group and subgroup are classified in the app.
+- Multiple operators work simultaneously with persistent filter selections.
+- Mobile-first: operators use phone/tablet camera for barcode scanning.
+- Two roles: Operador (count) and Admin (import, classify, export).
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Celular / Tablet (PWA React)                           │
+│  ┌──────────┐  ┌──────────┐  ┌──────────────────────┐ │
+│  │ Operador │  │  Admin   │  │ Câmera (html5-qrcode)│ │
+│  └────┬─────┘  └────┬─────┘  └──────────┬───────────┘ │
+└───────┼─────────────┼─────────────────────┼─────────────┘
+        │             │                     │
+        └─────────────┴──── HTTPS / JWT ──────┘
+                              │
+                    ┌─────────▼─────────┐
+                    │  ASP.NET Core API │
+                    └─────────┬─────────┘
+                              │
+                    ┌─────────▼─────────┐
+                    │    Azure SQL      │
+                    │  stg_erp (read)   │
+                    │  app (read/write) │
+                    └───────────────────┘
+```
+
+### Projects
+
+| Project | Stack | Deploy |
+|---------|-------|--------|
+| `InventarioRotativo.Web` | React + Vite + TypeScript (PWA) | Azure Static Web Apps |
+| `InventarioRotativo.Api` | ASP.NET Core 8 + EF Core | Azure App Service |
+
+### Database Access Rules
+
+- `stg_erp.*` — read-only (ERP staging, updated externally)
+- `app.*` — read/write (users, classification, counts, filters)
+
+## ERP Staging Tables (Read-Only)
+
+### `stg_erp.stg_bancoxodo__produto`
+
+Key columns used by the app:
+
+| Column | Type | Usage |
+|--------|------|-------|
+| `pro_codigo` | int | Product code (barcode suffix, e.g. 12122) |
+| `pro_desc` | nvarchar | Product description for search/display |
+| `pro_descres` | nvarchar | Short description |
+| `pro_tpicodigo` | int | Item type (from ERP, used in filters) |
+| `pro_ativo` | int | Active flag |
+
+### `stg_erp.stg_bancoxodo__unidade`
+
+| Column | Type | Usage |
+|--------|------|-------|
+| `UND_CODIGO` | nvarchar(10) | Unit code (e.g. PAL) |
+| `UND_DESC` | nvarchar | Unit description |
+| `UND_ATIVO` | int | Active flag |
+
+### `stg_erp.stg_bancoxodo__unidadepro`
+
+| Column | Type | Usage |
+|--------|------|-------|
+| `unp_procodigo` | int | Product code FK |
+| `unp_unidade` | nvarchar(10) | Unit code FK |
+| `unp_quantidade` | int | Conversion factor (e.g. 600 kg per pallet) |
+| `unp_ativo` | int | Active flag |
+
+### `stg_erp.stg_bancoxodo__ordemproducao`
+
+| Column | Type | Usage |
+|--------|------|-------|
+| `OPP_NUMERO` | int | Production order (barcode prefix, e.g. 48335) |
+| `opp_procodigo` | int | Product code |
+| `opp_numlote` | nvarchar(15) | Batch/lot number |
+| `opp_dtvenc` | date | Expiration date |
+| `opp_unpunidade` | nvarchar(10) | Unit on label |
+| `opp_unpquant` | int | Unit quantity factor |
+
+Updated frequently by external ingestion. App reads only.
+
+## Barcode Format
+
+Labels use a proprietary format, not EAN-13:
+
+```
+{OPP_NUMERO}.{pro_codigo_suffix}
+Example: 48335.12122
+```
+
+- `48335` → `OPP_NUMERO` (PRODUÇÃO on label)
+- `12122` → `pro_codigo` as integer (CÓDIGO `012122` on label, leading zero dropped)
+
+### Scan Resolution Flow
+
+1. Parse barcode into `opp_numero` and `pro_codigo`
+2. Lookup `ordemproducao` WHERE `OPP_NUMERO` = opp_numero AND `opp_procodigo` = pro_codigo
+3. Lookup `produto` WHERE `pro_codigo` = pro_codigo AND `pro_ativo` = 1
+4. Lookup `unidadepro` WHERE `unp_procodigo` = pro_codigo AND `unp_unidade` = opp_unpunidade
+5. Validate product matches operator's active filters (tipo item, grupo, subgrupo)
+6. Return preview: description, unit, lot, expiry, default quantity = 1
+
+Default quantity is always 1 whole unit of the label's unit (e.g. 1 pallet). Operator may adjust before submitting.
+
+### Error Cases
+
+| Condition | Message |
+|-----------|---------|
+| Invalid barcode format | "Formato não reconhecido" |
+| OP not found | "Ordem de produção não encontrada" |
+| Product outside filters | "Produto não pertence à seleção atual" |
+| Inactive product | "Produto inativo" |
+
+## App Schema Tables (New)
+
+### `app.usuario`
+
+```sql
+id            INT IDENTITY PK
+login         NVARCHAR(50) UNIQUE NOT NULL
+senha_hash    NVARCHAR(256) NOT NULL
+nome          NVARCHAR(100) NOT NULL
+perfil        NVARCHAR(20) NOT NULL  -- 'Operador' | 'Admin'
+ativo         BIT NOT NULL DEFAULT 1
+criado_em     DATETIME2 NOT NULL
+```
+
+### `app.grupo`
+
+```sql
+id            INT IDENTITY PK
+nome          NVARCHAR(100) NOT NULL
+ativo         BIT NOT NULL DEFAULT 1
+```
+
+### `app.subgrupo`
+
+```sql
+id            INT IDENTITY PK
+grupo_id      INT FK → app.grupo
+nome          NVARCHAR(100) NOT NULL
+ativo         BIT NOT NULL DEFAULT 1
+```
+
+### `app.produto_classificacao`
+
+```sql
+pro_codigo    INT PK
+grupo_id      INT FK → app.grupo
+subgrupo_id   INT FK → app.subgrupo
+atualizado_em DATETIME2 NOT NULL
+atualizado_por INT FK → app.usuario
+```
+
+Item type (`pro_tpicodigo`) comes from ERP — no separate app table needed.
+
+### `app.contagem`
+
+```sql
+id            BIGINT IDENTITY PK
+pro_codigo    INT NOT NULL
+opp_numero    INT NULL              -- OP from barcode (null if manual)
+unidade       NVARCHAR(10) NOT NULL
+lote          NVARCHAR(15) NOT NULL
+validade      DATE NOT NULL
+quantidade    DECIMAL(18,4) NOT NULL DEFAULT 1
+operador_id   INT FK → app.usuario NOT NULL
+tipo_item     INT NULL              -- filter snapshot
+grupo_id      INT NULL              -- filter snapshot
+subgrupo_id   INT NULL              -- filter snapshot
+origem        NVARCHAR(10) NOT NULL -- 'scan' | 'manual'
+registrado_em DATETIME2 NOT NULL
+```
+
+Each operator submission creates one row. Filter values are snapshotted for export traceability.
+
+### `app.operador_filtro`
+
+```sql
+operador_id   INT PK FK → app.usuario
+tipos_item    NVARCHAR(MAX) NULL   -- JSON array of pro_tpicodigo
+grupos_id     NVARCHAR(MAX) NULL   -- JSON array of grupo_id
+subgrupos_id  NVARCHAR(MAX) NULL   -- JSON array of subgrupo_id
+atualizado_em DATETIME2 NOT NULL
+```
+
+Filters persist across sessions until operator changes or clears them.
+
+## User Roles
+
+| Role | Capabilities |
+|------|-------------|
+| **Operador** | Login, set filters, scan/manual count, submit counts, view recent counts |
+| **Admin** | All Operador capabilities plus: CSV import, grupo/subgrupo management, product classification, export by date range |
+
+## Screens
+
+### Operador (Mobile-First)
+
+1. **Login** — username + password → JWT
+2. **Filtros** — multi-select Tipo de Item / Grupo / Subgrupo; Apply / Clear all; persisted in `app.operador_filtro`
+3. **Contagem** (main) — scan button, manual search button, last 5 counts summary, filter badge
+4. **Confirmação** (after scan or manual) — product, unit, lot, expiry, quantity (default 1); confirm or adjust → submit
+
+### Admin
+
+1. **Importação ERP** — CSV upload for produto/unidade/unidadepro; validation summary
+2. **Classificação** — list unclassified products; assign grupo/subgrupo individually or in batch
+3. **Exportação** — date range filter; preview; export CSV or Excel
+
+## API Endpoints
+
+Base: `/api/v1`. All routes except login require JWT.
+
+### Auth
+
+| Method | Route | Role | Description |
+|--------|-------|------|-------------|
+| POST | `/auth/login` | public | Returns JWT + profile |
+| GET | `/auth/me` | all | Current user info |
+
+### Operator Filters
+
+| Method | Route | Role | Description |
+|--------|-------|------|-------------|
+| GET | `/filtros` | Operador | Get saved filters |
+| PUT | `/filtros` | Operador | Save/update filters |
+| DELETE | `/filtros` | Operador | Clear all filters |
+
+### Counting
+
+| Method | Route | Role | Description |
+|--------|-------|------|-------------|
+| POST | `/contagem/scan` | Operador | Body: `{ barcode }` → resolve and return preview |
+| POST | `/contagem` | Operador | Body: confirmed data → save count |
+| GET | `/contagem/recentes` | Operador | Last 5 counts by operator |
+
+### Manual Search
+
+| Method | Route | Role | Description |
+|--------|-------|------|-------------|
+| GET | `/produtos?q=` | Operador | Search by code or description (respects filters) |
+| GET | `/produtos/{codigo}/unidades` | Operador | Product units from unidadepro |
+
+### Classification (Admin)
+
+| Method | Route | Role | Description |
+|--------|-------|------|-------------|
+| GET | `/grupos` | Admin | List groups |
+| POST | `/grupos` | Admin | Create group |
+| GET | `/subgrupos?grupoId=` | Admin | List subgroups |
+| POST | `/subgrupos` | Admin | Create subgroup |
+| GET | `/classificacao?semClassificar=true` | Admin | Unclassified products |
+| PUT | `/classificacao/{proCodigo}` | Admin | Assign grupo/subgrupo |
+
+### Import and Export (Admin)
+
+| Method | Route | Role | Description |
+|--------|-------|------|-------------|
+| POST | `/importacao/csv` | Admin | Upload ERP CSV |
+| GET | `/exportacao?de=&ate=` | Admin | Returns CSV or Excel file |
+
+### Catalogs
+
+| Method | Route | Role | Description |
+|--------|-------|------|-------------|
+| GET | `/tipos-item` | all | Distinct pro_tpicodigo values |
+| GET | `/grupos` | all | Active groups (for filters) |
+| GET | `/subgrupos` | all | Active subgroups (for filters) |
+
+## Export Format
+
+Admin exports by date range (start/end). Formats: CSV and Excel.
+
+| Column | Source |
+|--------|--------|
+| Código produto | `contagem.pro_codigo` |
+| Descrição | `produto.pro_desc` |
+| Unidade | `contagem.unidade` |
+| Lote | `contagem.lote` |
+| Validade | `contagem.validade` |
+| Quantidade | `contagem.quantidade` |
+| Operador | `usuario.nome` |
+| Data/hora | `contagem.registrado_em` |
+
+## Manual Entry Flow
+
+When barcode is unavailable:
+
+1. Operator searches product by code or description (filtered by active selection)
+2. Selects unit from product's `unidadepro` entries
+3. Enters lot, expiry, quantity manually
+4. Submits → saved as `origem = 'manual'`, `opp_numero = null`
+
+## Deployment
+
+| Component | Azure Service |
+|-----------|---------------|
+| API | App Service (.NET 8) |
+| PWA | Static Web Apps |
+| Database | Azure SQL (existing) |
+| Secrets | Key Vault (connection string, JWT secret) |
+
+## Testing Strategy
+
+- **API integration tests:** barcode parser, filter validation, count persistence, export generation
+- **Frontend component tests:** barcode parser, confirmation form
+- **Manual E2E:** full scan flow on mobile device with camera
+
+## Out of Scope (YAGNI)
+
+- Direct ERP API integration (CSV import only for MVP)
+- EAN-13 barcode support (proprietary format only)
+- Offline mode / sync queue
+- Supervisor role (only Operador and Admin)
+- Export by grupo/subgrupo filter (date range only)
+- Modifying `stg_erp` data from the app (read-only)
