@@ -15,7 +15,8 @@
 ## Global Constraints
 
 - Azure SQL: `stg_erp` read-only; `inventario` read/write
-- Barcode format: `{OPP_NUMERO}.{pro_codigo}` e.g. `45197.12122` (test OP from staging; label example `48335` not in DB)
+- Barcode format: `{OPP_NUMERO}.{pro_codigo}` e.g. `45120.12122` (OP finalizada com produção; `45197` é status E e fica fora)
+- Barcode scan OP eligibility: `OPP_STATUS = 'F'`, `opp_qtdeproduz > 0`, last 30 days via `COALESCE(opp_dtini, OPP_DTEMIS)`; only `pro_ativo=1` and `unp_ativo=1`
 - Default quantity on scan: `1` (one whole label unit)
 - Roles: `Operador` | `Admin` (JWT claims)
 - UI: CSS Modules + Xodó tokens — no Tailwind, no shadcn
@@ -326,10 +327,10 @@ git commit -m "feat(api): add JWT auth with Operador/Admin roles"
   "proCodigo": 12122,
   "descricao": "PÃO DE QUEIJO...",
   "unidade": "PAL",
-  "lote": "200526",
-  "validade": "2026-08-17",
+  "lote": "180526",
+  "validade": "2026-08-16",
   "quantidadePadrao": 1,
-  "oppNumero": 45197
+  "oppNumero": 45120
 }
 ```
 
@@ -338,10 +339,10 @@ git commit -m "feat(api): add JWT auth with Operador/Admin roles"
 ```json
 {
   "proCodigo": 12122,
-  "oppNumero": 45197,
+  "oppNumero": 45120,
   "unidade": "KG",
-  "lote": "200526",
-  "validade": "2026-08-17",
+  "lote": "180526",
+  "validade": "2026-08-16",
   "quantidade": 1,
   "origem": "scan"
 }
@@ -352,7 +353,7 @@ git commit -m "feat(api): add JWT auth with Operador/Admin roles"
 - [ ] **Step 1: Implement `ResolveScan(barcode, operadorId)`**
   1. Parse barcode
   2. Query produto (`pro_ativo = 1`) → else "Produto inativo"
-  3. Query `ordemproducao` by OPP_NUMERO + opp_procodigo AND `COALESCE(opp_dtini, OPP_DTEMIS) >= DATEADD(month, -1, today)` → else "Ordem de produção não encontrada"
+  3. Query `ordemproducao` by OPP_NUMERO + opp_procodigo AND `OPP_STATUS = 'F'` AND `opp_qtdeproduz > 0` AND `COALESCE(opp_dtini, OPP_DTEMIS) >= DATEADD(month, -1, today)` → else "Ordem de produção não encontrada"
   4. Query `unidadepro` (`unp_ativo = 1`, unit from OP) — join `unidade` (`UND_ATIVO = 1`)
   5. Validate against operador filters (tipo/grupo/subgrupo) → else "Produto não pertence à seleção atual"
   6. Return preview with `quantidadePadrao: 1`, lote and validade from OP

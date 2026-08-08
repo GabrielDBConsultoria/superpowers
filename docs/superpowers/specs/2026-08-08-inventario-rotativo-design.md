@@ -95,7 +95,8 @@ Key columns used by the app:
 | `opp_unpquant` | int | Unit quantity factor |
 | `opp_dtini` | date | Production start — used for "last month" OP window on barcode scans |
 | `OPP_DTEMIS` | date | Emission date (fallback if `opp_dtini` is null) |
-| `OPP_STATUS` | nvarchar | OP status (informational only in MVP) |
+| `OPP_STATUS` | nvarchar | OP status — barcode scans require `'F'` (finalizada) |
+| `opp_qtdeproduz` | float | Quantity produced — barcode scans require `> 0` |
 
 Updated frequently by external ingestion. App reads only.
 
@@ -117,15 +118,17 @@ Applies only to barcode scans (`origem = 'scan'`). Manual entry does not use OP 
 
 **Active-data rules:** only `pro_ativo = 1` products and `unp_ativo = 1` units.
 
-**OP window:** only production orders from the **last calendar month** (rolling 30 days) are eligible for lote/validade resolution:
+**OP eligibility (barcode scan only):** production orders must satisfy **all** of:
 
 ```sql
-COALESCE(opp_dtini, OPP_DTEMIS) >= DATEADD(month, -1, CAST(GETDATE() AS date))
+OPP_STATUS = 'F'
+AND opp_qtdeproduz > 0
+AND COALESCE(opp_dtini, OPP_DTEMIS) >= DATEADD(month, -1, CAST(GETDATE() AS date))
 ```
 
 1. Parse barcode into `opp_numero` and `pro_codigo`
 2. Lookup `produto` WHERE `pro_codigo` = pro_codigo AND `pro_ativo` = 1
-3. Lookup `ordemproducao` WHERE `OPP_NUMERO` = opp_numero AND `opp_procodigo` = pro_codigo AND within OP window above
+3. Lookup `ordemproducao` WHERE `OPP_NUMERO` = opp_numero AND `opp_procodigo` = pro_codigo AND OP eligibility above
 4. Lookup `unidadepro` WHERE `unp_procodigo` = pro_codigo AND `unp_unidade` = opp_unpunidade AND `unp_ativo` = 1
 5. Validate product matches operator's active filters (tipo item, grupo, subgrupo)
 6. Return preview: description, unit, lot (`opp_numlote`), expiry (`opp_dtvenc`), default quantity = 1
@@ -139,7 +142,7 @@ Labels with an OP older than the window (or not present in staging) cannot resol
 | Condition | Message |
 |-----------|---------|
 | Invalid barcode format | "Formato não reconhecido" |
-| OP not found (missing, wrong product, or outside last-month window) | "Ordem de produção não encontrada" — operator may use manual entry |
+| OP not found (missing, wrong product, outside last-month window, not status F, or zero production) | "Ordem de produção não encontrada" — operator may use manual entry |
 | Product outside filters | "Produto não pertence à seleção atual" |
 | Inactive product | "Produto inativo" |
 
@@ -428,6 +431,6 @@ Validated against `dwxodo.database.windows.net` / `dwxodo` via `inventario-rotat
 | `stg_erp` tables | 41+ `stg_bancoxodo__*` tables including produto, unidade, unidadepro, ordemproducao, grupopro, subgrupopro |
 | Product 12122 | PÃO DE QUEIJO TRADICIONAL PCT 1KG; `pro_tpicodigo = "04"`; active |
 | Units 12122 | KG (base, `unp_padestoque=1`), CX/20, FD/10, PAL/600, PCT/1; duplicate KG rows for devolução — use `unp_ativo=1` |
-| Label OP 48335 | **Not in staging** — use `45197.12122` for parser tests; note OP window uses `opp_dtini` (product 12122 OPs currently dated May 2026 — may fall outside rolling 30-day window at implementation time) |
+| Label OP 48335 | **Not in staging** — for scan tests use a finished OP e.g. `45120.12122` (status F, `opp_qtdeproduz > 0`, lote `180526`) |
 | Stock base unit | All active products have exactly one `unp_padestoque=1` row |
 | Conversion | For most products `unp_quantidade ≈ unp_fatestoque`; export uses `unp_fatestoque`. Edge case: product 550 PAL has quantidade=540, fatestoque=600 |
